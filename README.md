@@ -25,7 +25,7 @@ c/ Time Actor
 
 - Time Trigger
 
-![System Context](docs\images\architecture.png)
+![System Context](docs/images/architecture.png)
 
 ## 2. Kiến trúc tổng thể
 
