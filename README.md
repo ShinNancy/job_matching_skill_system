@@ -1,6 +1,5 @@
 ## 1. Bài toán là gì?
 
-
 Người tìm việc tại Việt Nam gặp ba khó khăn lớn: 
 
 (1) thông tin tuyển dụng phân tán trên nhiều site, không chuẩn hóa; 
@@ -165,3 +164,97 @@ LƯU Ý: XEM KỸ SƠ ĐỒ TẠI https://dbdiagram.io/d/Job-Matching-and-Skill-
 
 ## 5. API Endpoint
 
+| Code | Ý nghĩa|
+|---------|------|
+| `200 / 201` | OK / Đã tạo |
+| `202` | Đã nhận, xử lý bất đồng bộ (nếu matching chạy nền) |
+| `400` | Request sai cú pháp |
+| `401 / 403` | Chưa xác thực / Không đủ quyền |
+| `404` | Không tìm thấy tài nguyên |
+| `409` | Xung đột (vd email đã tồn tại) |
+| `422` | Cú pháp đúng nhưng nghiệp vụ không hợp lệ |
+| `429` | Quá rate limit |
+| `500` | Lỗi server |
+
+1. Quy ước chung
+
+Base path: `/api/v1/...` (public), `/internal/v1/...` => Khi muốn thêm version mới đổi thành `v2`
+
+Auth path: JWT Bearer cho mọi endpoint trừ `/auth/*` , Nếu đối với cá nhân dùng `me`
+
+Pagination: mọi endpoint trả danh sách dùng ?page=&size= (mặc định size=20, max=100). Response kèm page, size, totalElements, totalPages.
+
+2. Error Response chuẩn (RFC 7807)
+
+```
+{
+  "type": "https://api.example.com/problems/conflict",
+  "title": "Email already exists",
+  "status": 409,
+  "detail": "Email 'a@b.com' đã được đăng ký.",
+  "instance": "/api/v1/auth/register",
+  "timestamp": "2026-06-28T10:20:30Z",
+  "traceId": "5f1c7c1a5b",
+  "errors": [
+    { "field": "email", "message": "must be unique" }
+  ]
+}
+```
+
+errors[] chỉ xuất hiện với lỗi validation/422.
+
+Ví dụ "email đã tồn tại" dùng 409
+
+3. Public API — Endpoint Contract
+
+| Method   | Endpoint                                    | Chức năng                                          | Auth / Role            | Request DTO            | Response DTO                 | Success                                                    | Error                      |
+| -------- | ------------------------------------------- | -------------------------------------------------- | ---------------------- | ---------------------- | ---------------------------- | ---------------------------------------------------------- | -------------------------- |
+| **POST** | `/api/v1/auth/register`                     | Đăng ký tài khoản                                  | Public                 | `RegisterRequest`      | `UserResponse`               | **201 Created**                                            | `400`, `409`, `422`, `500` |
+| **POST** | `/api/v1/auth/login`                        | Đăng nhập và nhận JWT                              | Public                 | `LoginRequest`         | `JwtResponse`                | **200 OK**                                                 | `400`, `401`, `500`        |
+| **POST** | `/api/v1/auth/refresh`                      | Làm mới Access Token                               | Public (Refresh Token) | `RefreshRequest`       | `JwtResponse`                | **200 OK**                                                 | `401`                      |
+| **GET**  | `/api/v1/me/profile`                        | Xem thông tin hồ sơ cá nhân                        | JWT                    | —                      | `ProfileResponse`            | **200 OK**                                                 | `401`, `404`               |
+| **PUT**  | `/api/v1/me/profile`                        | Cập nhật hồ sơ cá nhân                             | JWT                    | `UpdateProfileRequest` | `ProfileResponse`            | **200 OK**                                                 | `400`, `401`, `422`        |
+| **POST** | `/api/v1/me/telegram`                       | Liên kết tài khoản Telegram                        | JWT                    | `TelegramLinkRequest`  | `TelegramLinkResponse`       | **200 OK**                                                 | `401`, `409`               |
+| **GET**  | `/api/v1/me/recommendations?page=&size=`    | Lấy danh sách Top-N việc làm phù hợp               | JWT                    | Query Parameters       | `RecommendationPageResponse` | **200 OK** *(hoặc **202 Accepted** nếu xử lý bất đồng bộ)* | `401`, `429`, `500`        |
+| **GET**  | `/api/v1/me/skill-gap?jobFamily=`           | Phân tích kỹ năng còn thiếu theo nhóm nghề         | JWT                    | Query Parameters       | `SkillGapResponse`           | **200 OK**                                                 | `401`, `404`, `422`        |
+| **GET**  | `/api/v1/jobs/{id}`                         | Xem chi tiết việc làm                              | JWT                    | Path Variable          | `JobDetailResponse`          | **200 OK**                                                 | `401`, `404`               |
+| **GET**  | `/api/v1/jobs/{id}/competition`             | Xem mức độ cạnh tranh của vị trí tuyển dụng        | JWT                    | Path Variable          | `CompetitionResponse`        | **200 OK**                                                 | `401`, `404`               |
+| **GET**  | `/api/v1/trends/salary?industry=&location=` | Xem dashboard xu hướng lương theo ngành và khu vực | JWT                    | Query Parameters       | `SalaryTrendResponse`        | **200 OK**                                                 | `401`, `404`               |
+| **GET**  | `/api/v1/admin/data-quality?runId=`         | Theo dõi chất lượng dữ liệu (Data Quality)         | JWT + `ROLE_ADMIN`     | Query Parameters       | `DataQualityResponse`        | **200 OK**                                                 | `401`, `403`, `404`        |
+
+4. Phân chia trách nhiệm tính điểm 
+
+Python trả tín hiệu, Java ráp điểm
+
+FastAPI: candidate generation (vector search) + tính độ tương đồng ngữ nghĩa kỹ năng cho từng job.
+
+Java: đọc `job_skill.is_required` + `user_skill`, tính **Gate must-have**, tính `exp/edu/cert score`, áp `weight_profile(jobFamily)` → ráp `matchScore` + `components`.
+
+5. Internal API (Spring Boot → FastAPI)
+
+5.1. `POST /internal/v1/candidates` 
+
+Đây là bước Recall.
+
+Nhiệm vụ của AI là:
+
+Trong khoảng 100.000 việc làm,
+
+hãy chọn ra khoảng 200 việc làm có khả năng phù hợp nhất.
+
+Chưa cần xếp hạng chính xác.
+
+5.2. `POST /internal/v1/match-signals`
+
+Đây là bước Ranking, dùng để đánh giá mức độ phù hợp giữa hồ sơ của người dùng và các công việc đã được chọn ở bước trước.
+
+5.3. `POST /internal/v1/competition-score` - độ cạnh tranh của vị trí
+
+Mục đích là tính mức cạnh tranh của một Job
+
+5.4. `POST /internal/v1/skill-gap` - phân tích gap
+
+Nó không chỉ liệt kê kỹ năng còn thiếu mà còn xếp hạng mức độ ưu tiên và giải thích lý do.
+
+
+**Requirements → Architecture → Tech Selection → Database/ERD → API Contract → UML.**
