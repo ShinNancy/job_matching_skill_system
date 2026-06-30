@@ -1,26 +1,27 @@
-from dataclasses import dataclass
+# jobcrawler/items.py
+# RawJob — data class lưu dữ liệu thô ngay sau khi crawl, chưa qua xử lý.
+
+from dataclasses import dataclass, field
 from datetime import datetime
 
-# Dataclass dùng để lưu dữ liệu thô (raw data) của một tin tuyển dụng
-# ngay sau khi crawl từ website, trước khi được xử lý hoặc chuẩn hóa.
+
 @dataclass
 class RawJob:
-    # Tên website nguồn (ví dụ: vietnamworks, topcv, linkedin...)
-    source_site: str
+    # ── Thông tin định danh ───────────────────────────────────────────────────
+    source_site: str        # Tên site nguồn: "itviec", "topcv", ...
+    source_job_id: str      # ID job trên site gốc
+    source_url: str         # URL gốc của trang job
 
-    # ID của tin tuyển dụng trên website nguồn
-    source_job_id: str
+    # ── Nội dung thô ─────────────────────────────────────────────────────────
+    raw_html: str | None    # HTML đầy đủ của trang (None nếu không lưu)
+    raw_json: dict | None   # JSON từ __NEXT_DATA__ hoặc API (None nếu không có)
 
-    # Đường dẫn (URL) gốc của tin tuyển dụng
-    source_url: str
+    # ── Metadata crawl ────────────────────────────────────────────────────────
+    crawled_at: datetime    # Thời điểm crawl (UTC)
 
-    # Nội dung HTML gốc của trang tuyển dụng.
-    # Có thể là None nếu không lưu HTML.
-    raw_html: str | None
-
-    # Dữ liệu JSON gốc lấy từ API hoặc website.
-    # Có thể là None nếu nguồn không trả về JSON.
-    raw_json: dict | None
-
-    # Thời điểm hệ thống crawl và lưu dữ liệu
-    crawled_at: datetime
+    # ── Fields có giá trị mặc định ────────────────────────────────────────────
+    http_status_code: int = 200         # HTTP status code của response
+    content_length: int = 0             # Kích thước HTML (bytes)
+    content_checksum: str = ""          # MD5 của HTML — dùng để detect thay đổi
+    playwright_used: bool = False       # True nếu dùng Playwright để render
+    minio_path: str = ""                # Object path trong MinIO sau khi upload
