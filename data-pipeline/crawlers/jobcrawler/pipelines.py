@@ -198,22 +198,16 @@ class PostgresPipeline:
     """
 
     def open_spider(self, spider):
-        self.conn = None
-        self.cursor = None
+        self.conn = psycopg2.connect(
+            dsn=os.getenv(
+                "DATABASE_URL",
+                "postgresql://postgres:postgres@localhost:5437/jobmatching"
+            )
+        )
+        self.conn.autocommit = False
+        self.cursor = self.conn.cursor()
         self.insert_count = 0
         self.error_count = 0
-        try:
-            self.conn = psycopg2.connect(
-                dsn=os.getenv(
-                    "DATABASE_URL",
-                    "postgresql://postgres:postgres@localhost:5432/jobmatching"
-                )
-            )
-            self.conn.autocommit = False
-            self.cursor = self.conn.cursor()
-        except Exception as e:
-            # Không crash crawler khi DB chưa sẵn sàng — chỉ log warning
-            logger.warning("PostgresPipeline: không kết nối được DB: %s", e)
 
     def close_spider(self, spider):
         # Guard: open_spider có thể đã fail → conn/cursor chưa được set

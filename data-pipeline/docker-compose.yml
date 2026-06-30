@@ -33,7 +33,7 @@ services:
     image: postgres:16-alpine
     container_name: jobcrawler-postgres
     ports:
-      - "5432:5432"
+      - "5437:5432"
     environment:
       POSTGRES_DB: ${POSTGRES_DB:-jobmatching}
       POSTGRES_USER: ${POSTGRES_USER:-postgres}
