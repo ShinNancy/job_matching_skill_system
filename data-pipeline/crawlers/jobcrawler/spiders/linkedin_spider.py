@@ -1,6 +1,6 @@
 # spiders/linkedin_spider.py
-# LinkedIn yêu cầu cookie auth. Nếu chưa có LINKEDIN_LI_AT thì sẽ lưu debug HTML
-# để biết trang trả về gì (thường là login page hoặc limited results).
+# LinkedIn yêu cầu cookie auth. Nếu chưa có LINKEDIN_LI_AT thì lưu debug HTML.
+# list_checksum = MD5(title + company) từ JSON-LD hoặc CSS.
 
 import json
 import os
@@ -8,6 +8,7 @@ import os
 import scrapy
 from scrapy.http import Response
 
+from jobcrawler.crawl_strategy import ListingItem
 from jobcrawler.spiders.base.base_spider import BaseJobSpider
 from jobcrawler.spiders.base.site_config import SITE_CONFIGS, SiteConfig
 
@@ -54,7 +55,7 @@ class LinkedInSpider(BaseJobSpider):
             errback=self.handle_error,
         )
 
-    def extract_job_links(self, response: Response) -> list[str]:
+    def extract_listing_items(self, response: Response) -> list[ListingItem]:
         # ── Thử JSON-LD ──────────────────────────────────────────────────────
         for raw in response.css('script[type="application/ld+json"]::text').getall():
             try:
@@ -65,36 +66,78 @@ class LinkedInSpider(BaseJobSpider):
             for obj in candidates:
                 if not isinstance(obj, dict):
                     continue
+                target = None
                 if obj.get("@type") == "ItemList":
-                    links = [item["url"] for item in obj.get("itemListElement", []) if item.get("url")]
-                    if links:
-                        self.logger.info("Tìm thấy %d links từ JSON-LD", len(links))
-                        return links
+                    target = obj
                 main = obj.get("mainEntity", {})
                 if isinstance(main, dict) and main.get("@type") == "ItemList":
-                    links = [
-                        item["item"]["url"]
-                        for item in main.get("itemListElement", [])
-                        if isinstance(item.get("item"), dict) and item["item"].get("url")
-                    ]
-                    if links:
-                        self.logger.info("Tìm thấy %d links từ JSON-LD mainEntity", len(links))
-                        return links
+                    target = main
+                if target:
+                    items = self._parse_jsonld_items(target)
+                    if items:
+                        self.logger.info("LinkedIn: %d jobs từ JSON-LD", len(items))
+                        return items
 
         # ── CSS selectors LinkedIn đã biết ───────────────────────────────────
-        selectors = [
-            "a.base-card__full-link::attr(href)",
-            "a[data-tracking-control-name*='search-card']::attr(href)",
-            "a[href*='/jobs/view/']::attr(href)",
-        ]
-        for sel in selectors:
-            links = response.css(sel).getall()
-            if links:
-                self.logger.info("Tìm thấy %d links từ CSS selector: %s", len(links), sel)
-                return links
+        cards = response.css("div.base-card, li.jobs-search__results-list > div")
+        if cards:
+            items = []
+            for card in cards:
+                href = (
+                    card.css("a.base-card__full-link::attr(href)").get()
+                    or card.css("a[data-tracking-control-name*='search-card']::attr(href)").get()
+                    or card.css("a[href*='/jobs/view/']::attr(href)").get()
+                )
+                if not href:
+                    continue
+                url     = href.split("?")[0]
+                title   = card.css("h3.base-search-card__title::text").get(default="").strip()
+                company = card.css("h4.base-search-card__subtitle::text").get(default="").strip()
+                job_id  = self._extract_job_id(url, self.site_config.job_id_pattern)
+                items.append(ListingItem(
+                    job_id=job_id,
+                    url=url,
+                    list_checksum=self._make_checksum(title, company),
+                ))
+            if items:
+                self.logger.info("LinkedIn: %d jobs từ CSS selector", len(items))
+                return items
+
+        # ── Fallback: href only (no card structure) ───────────────────────────
+        hrefs = response.css("a[href*='/jobs/view/']::attr(href)").getall()
+        if hrefs:
+            items = []
+            for href in hrefs:
+                url    = href.split("?")[0]
+                job_id = self._extract_job_id(url, self.site_config.job_id_pattern)
+                items.append(ListingItem(
+                    job_id=job_id,
+                    url=url,
+                    list_checksum=self._make_checksum(url),
+                ))
+            self.logger.info("LinkedIn: %d jobs từ href fallback", len(items))
+            return items
 
         # ── DEBUG ─────────────────────────────────────────────────────────────
-        self.logger.warning("Không tìm thấy job links — lưu debug_linkedin.html")
+        self.logger.warning("LinkedIn: không tìm thấy job links — lưu debug_linkedin.html")
         with open("debug_linkedin.html", "w", encoding="utf-8") as f:
             f.write(response.text)
         return []
+
+    def _parse_jsonld_items(self, item_list: dict) -> list[ListingItem]:
+        result = []
+        for el in item_list.get("itemListElement", []):
+            inner = el.get("item", {}) if isinstance(el.get("item"), dict) else el
+            url   = inner.get("url", "")
+            if not url:
+                continue
+            title   = inner.get("name", "")
+            org     = inner.get("hiringOrganization", {})
+            company = org.get("name", "") if isinstance(org, dict) else ""
+            job_id  = self._extract_job_id(url, self.site_config.job_id_pattern)
+            result.append(ListingItem(
+                job_id=job_id,
+                url=url,
+                list_checksum=self._make_checksum(title, company),
+            ))
+        return result

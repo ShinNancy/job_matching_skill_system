@@ -51,24 +51,55 @@ class ValidationPipeline:
 
 
 # ── Pipeline 2: Deduplication (priority 200) ─────────────────────────────────
-# Bỏ qua job đã thấy trong cùng 1 run.
-# TODO: Thay in-memory set bằng Redis để dedup across runs.
+# Bỏ qua job đã crawl trong cùng run (in-memory) VÀ cross-run (Redis).
+# CrawlStrategy trong spider đã lọc hầu hết duplicates trước khi request được tạo.
+# Pipeline này là lớp bảo vệ thứ hai — tránh lưu 2 lần nếu spider yield trùng.
 
 class DedupPipeline:
 
     def open_spider(self, spider):
-        self.seen: set[str] = set()
+        self.seen: set[str] = set()   # in-run dedup
+        self.redis = None
         self.dedup_count = 0
+        try:
+            import os
+            import redis
+            self.redis = redis.Redis(
+                host=os.getenv("REDIS_HOST", "localhost"),
+                port=int(os.getenv("REDIS_PORT", "6379")),
+                db=int(os.getenv("REDIS_DB", "0")),
+                socket_connect_timeout=3,
+            )
+            self.redis.ping()
+        except Exception as e:
+            logger.warning("DedupPipeline: Redis không kết nối (%s) — dùng in-memory only", e)
+            self.redis = None
 
     def close_spider(self, spider):
         logger.info("DedupPipeline: skipped %d duplicates", self.dedup_count)
 
     def process_item(self, item: RawJob, spider) -> RawJob:
         key = f"{item.source_site}:{item.source_job_id}"
+
+        # In-memory check (trong 1 run)
         if key in self.seen:
             self.dedup_count += 1
-            raise DropItem(f"Duplicate: {key}")
+            raise DropItem(f"Duplicate (in-run): {key}")
         self.seen.add(key)
+
+        # Redis check (cross-run — trong 24 giờ)
+        if self.redis:
+            redis_key = f"dedup:{key}"
+            try:
+                if self.redis.get(redis_key):
+                    self.dedup_count += 1
+                    raise DropItem(f"Duplicate (cross-run): {key}")
+                self.redis.setex(redis_key, 24 * 3600, "1")  # TTL 24h
+            except DropItem:
+                raise
+            except Exception as e:
+                logger.debug("DedupPipeline Redis error: %s", e)
+
         return item
 
 
@@ -143,18 +174,27 @@ class PostgresPipeline:
             source_site, source_job_id, source_url,
             minio_path, crawled_at,
             http_status_code, content_length, content_checksum,
-            playwright_used, etl_status
+            playwright_used, etl_status,
+            list_checksum, source_updated_at,
+            first_seen_at, crawl_count, recrawl_after
         ) VALUES (
             %(source_site)s, %(source_job_id)s, %(source_url)s,
             %(minio_path)s, %(crawled_at)s,
             %(http_status_code)s, %(content_length)s, %(content_checksum)s,
-            %(playwright_used)s, 'PENDING'
+            %(playwright_used)s, 'PENDING',
+            %(list_checksum)s, %(source_updated_at)s,
+            %(crawled_at)s, 1,
+            %(crawled_at)s + INTERVAL '1 day'
         )
         ON CONFLICT (source_site, source_job_id) DO UPDATE SET
-            crawled_at      = EXCLUDED.crawled_at,
-            minio_path      = EXCLUDED.minio_path,
+            crawled_at       = EXCLUDED.crawled_at,
+            minio_path       = EXCLUDED.minio_path,
             content_checksum = EXCLUDED.content_checksum,
-            etl_status      = 'PENDING';
+            list_checksum    = EXCLUDED.list_checksum,
+            source_updated_at= EXCLUDED.source_updated_at,
+            crawl_count      = raw_job_postings.crawl_count + 1,
+            recrawl_after    = EXCLUDED.crawled_at + INTERVAL '1 day',
+            etl_status       = 'PENDING';
     """
 
     def open_spider(self, spider):
@@ -191,15 +231,17 @@ class PostgresPipeline:
     def process_item(self, item: RawJob, spider) -> RawJob:
         try:
             self.cursor.execute(self.UPSERT_SQL, {
-                "source_site":      item.source_site,
-                "source_job_id":    item.source_job_id,
-                "source_url":       item.source_url,
-                "minio_path":       item.minio_path,
-                "crawled_at":       item.crawled_at,
-                "http_status_code": item.http_status_code,
-                "content_length":   item.content_length,
-                "content_checksum": item.content_checksum,
-                "playwright_used":  item.playwright_used,
+                "source_site":       item.source_site,
+                "source_job_id":     item.source_job_id,
+                "source_url":        item.source_url,
+                "minio_path":        item.minio_path,
+                "crawled_at":        item.crawled_at,
+                "http_status_code":  item.http_status_code,
+                "content_length":    item.content_length,
+                "content_checksum":  item.content_checksum,
+                "playwright_used":   item.playwright_used,
+                "list_checksum":     item.list_checksum,
+                "source_updated_at": item.source_updated_at,
             })
             # Commit mỗi 100 items để tránh transaction quá lớn
             self.insert_count += 1

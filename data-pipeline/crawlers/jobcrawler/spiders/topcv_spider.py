@@ -1,11 +1,13 @@
 # spiders/topcv_spider.py
-# TopCV dùng JSON-LD với cấu trúc lồng:
-# CollectionPage → mainEntity (ItemList) → itemListElement[i].item.url
+# TopCV dùng JSON-LD CollectionPage với mainEntity là ItemList (lồng nhau).
+# Path: data["mainEntity"]["itemListElement"][i]["item"]["url"]
+# title + company nằm trong ["item"]["name"] và ["item"]["hiringOrganization"]["name"].
 
 import json
 
 from scrapy.http import Response
 
+from jobcrawler.crawl_strategy import ListingItem
 from jobcrawler.spiders.base.base_spider import BaseJobSpider
 from jobcrawler.spiders.base.site_config import SITE_CONFIGS, SiteConfig
 
@@ -18,10 +20,10 @@ class TopCVSpider(BaseJobSpider):
     def site_config(self) -> SiteConfig:
         return SITE_CONFIGS["topcv"]
 
-    def extract_job_links(self, response: Response) -> list[str]:
+    def extract_listing_items(self, response: Response) -> list[ListingItem]:
         """
-        TopCV dùng JSON-LD CollectionPage với mainEntity là ItemList.
-        Path: data["mainEntity"]["itemListElement"][i]["item"]["url"]
+        TopCV: CollectionPage → mainEntity (ItemList) → itemListElement[i].item.url
+        Fallback: ItemList trực tiếp (như ITViec).
         """
         for raw in response.css('script[type="application/ld+json"]::text').getall():
             try:
@@ -29,31 +31,56 @@ class TopCVSpider(BaseJobSpider):
             except (json.JSONDecodeError, ValueError):
                 continue
 
-            # JSON-LD có thể là object hoặc array
             candidates = data if isinstance(data, list) else [data]
             for obj in candidates:
                 if not isinstance(obj, dict):
                     continue
 
-                # TopCV: CollectionPage chứa mainEntity là ItemList
+                # Cấu trúc lồng: CollectionPage → mainEntity → ItemList
                 main_entity = obj.get("mainEntity", {})
                 if isinstance(main_entity, dict) and main_entity.get("@type") == "ItemList":
-                    items = main_entity.get("itemListElement", [])
-                    links = [
-                        item["item"]["url"]
-                        for item in items
-                        if isinstance(item.get("item"), dict) and item["item"].get("url")
-                    ]
-                    if links:
-                        self.logger.info("Tìm thấy %d job links từ JSON-LD mainEntity", len(links))
-                        return links
+                    items = self._parse_item_list(main_entity)
+                    if items:
+                        self.logger.info("TopCV: %d jobs từ JSON-LD mainEntity", len(items))
+                        return items
 
-                # Fallback: ItemList trực tiếp (giống ITViec)
+                # Fallback: ItemList trực tiếp
                 if obj.get("@type") == "ItemList":
-                    links = [item["url"] for item in obj.get("itemListElement", []) if item.get("url")]
-                    if links:
-                        self.logger.info("Tìm thấy %d job links từ JSON-LD ItemList", len(links))
-                        return links
+                    items = self._parse_item_list(obj)
+                    if items:
+                        self.logger.info("TopCV: %d jobs từ JSON-LD ItemList trực tiếp", len(items))
+                        return items
 
-        self.logger.warning("Không tìm thấy job links trong JSON-LD")
+        self.logger.warning("TopCV: không tìm thấy job links trong JSON-LD")
         return []
+
+    def _parse_item_list(self, item_list: dict) -> list[ListingItem]:
+        """Parse itemListElement — hỗ trợ cả flat ({url}) và nested ({item: {url}})."""
+        result = []
+        for el in item_list.get("itemListElement", []):
+            if not isinstance(el, dict):
+                continue
+
+            # TopCV nested: el["item"]["url"]
+            inner = el.get("item", {})
+            if isinstance(inner, dict) and inner.get("url"):
+                url     = inner["url"]
+                title   = inner.get("name", "")
+                org     = inner.get("hiringOrganization", {})
+                company = org.get("name", "") if isinstance(org, dict) else ""
+            # Flat: el["url"]
+            elif el.get("url"):
+                url     = el["url"]
+                title   = el.get("name", "")
+                org     = el.get("hiringOrganization", {})
+                company = org.get("name", "") if isinstance(org, dict) else ""
+            else:
+                continue
+
+            job_id = self._extract_job_id(url, self.site_config.job_id_pattern)
+            result.append(ListingItem(
+                job_id=job_id,
+                url=url,
+                list_checksum=self._make_checksum(title, company),
+            ))
+        return result

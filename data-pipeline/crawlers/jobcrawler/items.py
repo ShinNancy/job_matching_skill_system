@@ -22,6 +22,11 @@ class RawJob:
     # ── Fields có giá trị mặc định ────────────────────────────────────────────
     http_status_code: int = 200         # HTTP status code của response
     content_length: int = 0             # Kích thước HTML (bytes)
-    content_checksum: str = ""          # MD5 của HTML — dùng để detect thay đổi
+    content_checksum: str = ""          # MD5 của HTML detail page
     playwright_used: bool = False       # True nếu dùng Playwright để render
     minio_path: str = ""                # Object path trong MinIO sau khi upload
+
+    # ── Incremental crawling ──────────────────────────────────────────────────
+    list_checksum: str = ""             # MD5(title+company) từ trang listing — detect thay đổi nhẹ
+    source_updated_at: datetime | None = field(default=None)
+    # ↑ Thời điểm site báo job được cập nhật (nếu site cung cấp)

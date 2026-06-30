@@ -1,11 +1,14 @@
 # spiders/vietnamworks_spider.py
-# VietnamWorks render job list phía server — dùng CSS selector trực tiếp.
-# Job cards nằm trong div[class*="new-job-card"], link là thẻ <a href*="-jv">.
+# VietnamWorks render job list phía server (SSR).
+# Job cards: div[class*="new-job-card"] — link, title, company đều có trong HTML.
+# list_checksum = MD5(title + company) — detect nếu job được đổi title hoặc công ty.
 
 import json
+import re
 
 from scrapy.http import Response
 
+from jobcrawler.crawl_strategy import ListingItem
 from jobcrawler.spiders.base.base_spider import BaseJobSpider
 from jobcrawler.spiders.base.site_config import SITE_CONFIGS, SiteConfig
 
@@ -18,24 +21,38 @@ class VietnamWorksSpider(BaseJobSpider):
     def site_config(self) -> SiteConfig:
         return SITE_CONFIGS["vietnamworks"]
 
-    def extract_job_links(self, response: Response) -> list[str]:
+    def extract_listing_items(self, response: Response) -> list[ListingItem]:
         """
-        VietnamWorks render job list trong SSR HTML.
-        CSS: div.new-job-card > a[href*='-jv']
-        URL có query params → strip trước khi dùng.
+        Lấy job cards từ HTML — mỗi card có div.new-job-card.
+        Strip query params khỏi URL vì VietnamWorks thêm tracking params.
         """
-        # CSS selector — lấy href từ thẻ a bên trong new-job-card
-        raw_links = response.css('div[class*="new-job-card"] a[href*="-jv"]::attr(href)').getall()
+        items = []
+        cards = response.css('div[class*="new-job-card"]')
 
-        # Strip query params: /ten-job-12345-jv?source=... → /ten-job-12345-jv
-        links = [url.split("?")[0] for url in raw_links]
-        links = [l for l in links if l]  # bỏ empty
+        for card in cards:
+            # Lấy URL từ thẻ a đầu tiên có href chứa "-jv"
+            href = card.css('a[href*="-jv"]::attr(href)').get()
+            if not href:
+                continue
+            url = href.split("?")[0]  # bỏ query params
 
-        if links:
-            self.logger.info("Tìm thấy %d job links từ CSS selector", len(links))
-            return links
+            # Title và company từ card (nếu có trong HTML)
+            title   = card.css('h2::text, h3::text, [class*="title"]::text').get(default="").strip()
+            company = card.css('[class*="company"]::text, [class*="employer"]::text').get(default="").strip()
 
-        # Fallback: thử JSON-LD nếu CSS không ra
+            job_id = self._extract_job_id(url, self.site_config.job_id_pattern)
+            items.append(ListingItem(
+                job_id=job_id,
+                url=url,
+                list_checksum=self._make_checksum(title, company, url),
+                # url vào checksum để phân biệt khi title/company chưa extract được
+            ))
+
+        if items:
+            self.logger.info("VietnamWorks: %d jobs từ CSS selector", len(items))
+            return items
+
+        # Fallback: JSON-LD
         for raw in response.css('script[type="application/ld+json"]::text').getall():
             try:
                 data = json.loads(raw.strip())
@@ -45,19 +62,25 @@ class VietnamWorksSpider(BaseJobSpider):
             for obj in candidates:
                 if not isinstance(obj, dict):
                     continue
+                target = None
                 if obj.get("@type") == "ItemList":
-                    found = [item["url"] for item in obj.get("itemListElement", []) if item.get("url")]
-                    if found:
-                        return found
+                    target = obj
                 main = obj.get("mainEntity", {})
                 if isinstance(main, dict) and main.get("@type") == "ItemList":
-                    found = [
-                        item["item"]["url"]
-                        for item in main.get("itemListElement", [])
-                        if isinstance(item.get("item"), dict) and item["item"].get("url")
-                    ]
-                    if found:
-                        return found
+                    target = main
+                if target:
+                    fallback = []
+                    for el in target.get("itemListElement", []):
+                        url = (el.get("item", {}) or {}).get("url") or el.get("url")
+                        if url:
+                            job_id = self._extract_job_id(url, self.site_config.job_id_pattern)
+                            fallback.append(ListingItem(
+                                job_id=job_id,
+                                url=url,
+                                list_checksum=self._make_checksum(url),
+                            ))
+                    if fallback:
+                        return fallback
 
-        self.logger.warning("Không tìm thấy job links trên VietnamWorks")
+        self.logger.warning("VietnamWorks: không tìm thấy job links")
         return []
