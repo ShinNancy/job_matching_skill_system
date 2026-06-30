@@ -1,0 +1,52 @@
+version: "3.9"
+
+# ── Data Pipeline Infrastructure ──────────────────────────────────────────────
+# Services: MinIO (object storage) + PostgreSQL (metadata DB)
+#
+# Chạy:  docker compose up -d
+# Stop:  docker compose down
+# Reset: docker compose down -v   (xóa luôn data)
+
+services:
+
+  # ── MinIO: lưu raw HTML ──────────────────────────────────────────────────
+  minio:
+    image: minio/minio:RELEASE.2024-03-15T01-07-19Z
+    container_name: jobcrawler-minio
+    command: server /data --console-address ":9001"
+    ports:
+      - "9000:9000"   # S3 API — crawler kết nối vào đây
+      - "9001:9001"   # Web Console — mở trình duyệt để xem file
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ACCESS_KEY:-minioadmin}
+      MINIO_ROOT_PASSWORD: ${MINIO_SECRET_KEY:-minioadmin123}
+    volumes:
+      - minio_data:/data
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+
+  # ── PostgreSQL: lưu metadata crawl ───────────────────────────────────────
+  postgres:
+    image: postgres:16-alpine
+    container_name: jobcrawler-postgres
+    ports:
+      - "5432:5432"
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-jobmatching}
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./init-db:/docker-entrypoint-initdb.d   # Chạy SQL init khi lần đầu khởi động
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-postgres}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  minio_data:
+  postgres_data:

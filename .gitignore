@@ -25,3 +25,6 @@ test-results/
 
 # Scrapy
 .scrapy/
+
+# Test connection file
+test_connections.py
