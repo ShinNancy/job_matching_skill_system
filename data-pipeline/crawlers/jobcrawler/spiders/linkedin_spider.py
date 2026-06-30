@@ -1,18 +1,8 @@
 # spiders/linkedin_spider.py
-# LinkedIn spider — CẦN XỬ LÝ ĐẶC BIỆT vì yêu cầu đăng nhập.
-#
-# ⚠️  QUAN TRỌNG TRƯỚC KHI CHẠY:
-#   1. LinkedIn chặn bot rất mạnh (Cloudflare + fingerprinting).
-#   2. Crawl mà không đăng nhập chỉ thấy được ~5-10 job đầu tiên.
-#   3. Cần inject cookie `li_at` từ browser đã đăng nhập thật.
-#
-# Cách lấy cookie li_at:
-#   - Đăng nhập LinkedIn trên Chrome
-#   - F12 → Application → Cookies → linkedin.com → copy giá trị `li_at`
-#   - Đặt vào biến môi trường: LINKEDIN_LI_AT=<value>
-#
-# TODO: Cân nhắc ToS của LinkedIn trước khi crawl thật sự.
+# LinkedIn yêu cầu cookie auth. Nếu chưa có LINKEDIN_LI_AT thì sẽ lưu debug HTML
+# để biết trang trả về gì (thường là login page hoặc limited results).
 
+import json
 import os
 
 import scrapy
@@ -26,36 +16,36 @@ class LinkedInSpider(BaseJobSpider):
     name = "linkedin"
     allowed_domains = ["linkedin.com", "www.linkedin.com"]
 
+    # LinkedIn chặn bot trong robots.txt → override riêng cho spider này
+    custom_settings = {
+        "ROBOTSTXT_OBEY": False,
+    }
+
     @property
     def site_config(self) -> SiteConfig:
         return SITE_CONFIGS["linkedin"]
 
     def start_requests(self):
-        """Override để inject auth cookie trước khi crawl."""
-        li_at = os.getenv("LINKEDIN_LI_AT", "")
-        if not li_at:
-            self.logger.error(
-                "LINKEDIN_LI_AT chưa được set. "
-                "Lấy cookie từ browser đã đăng nhập và set biến môi trường này."
-            )
-            return  # Không crawl nếu chưa có auth
-
+        """Override để inject auth cookie nếu có."""
+        li_at = os.getenv("LINKEDIN_LI_AT", "").strip()
         config = self.site_config
         meta = self._build_playwright_meta(config.wait_for_selector)
 
-        # Inject cookie auth vào Playwright context
-        meta["playwright_context_kwargs"] = {
-            "storage_state": {
-                "cookies": [{
-                    "name": "li_at",
-                    "value": li_at,
-                    "domain": ".linkedin.com",
-                    "path": "/",
-                    "secure": True,
-                    "httpOnly": True,
-                }]
+        if li_at:
+            meta["playwright_context_kwargs"] = {
+                "storage_state": {
+                    "cookies": [{
+                        "name": "li_at",
+                        "value": li_at,
+                        "domain": ".linkedin.com",
+                        "path": "/",
+                        "secure": True,
+                        "httpOnly": True,
+                    }]
+                }
             }
-        }
+        else:
+            self.logger.warning("LINKEDIN_LI_AT chưa set — crawl không cần auth (kết quả giới hạn)")
 
         yield scrapy.Request(
             url=config.start_url,
@@ -65,17 +55,46 @@ class LinkedInSpider(BaseJobSpider):
         )
 
     def extract_job_links(self, response: Response) -> list[str]:
-        """
-        LinkedIn pagination dùng offset (start=0, start=25, start=50...).
-        Job links nằm trong thẻ <a class="base-card__full-link">.
-        """
-        links = response.css("a.base-card__full-link::attr(href)").getall()
+        # ── Thử JSON-LD ──────────────────────────────────────────────────────
+        for raw in response.css('script[type="application/ld+json"]::text').getall():
+            try:
+                data = json.loads(raw.strip())
+            except (json.JSONDecodeError, ValueError):
+                continue
+            candidates = data if isinstance(data, list) else [data]
+            for obj in candidates:
+                if not isinstance(obj, dict):
+                    continue
+                if obj.get("@type") == "ItemList":
+                    links = [item["url"] for item in obj.get("itemListElement", []) if item.get("url")]
+                    if links:
+                        self.logger.info("Tìm thấy %d links từ JSON-LD", len(links))
+                        return links
+                main = obj.get("mainEntity", {})
+                if isinstance(main, dict) and main.get("@type") == "ItemList":
+                    links = [
+                        item["item"]["url"]
+                        for item in main.get("itemListElement", [])
+                        if isinstance(item.get("item"), dict) and item["item"].get("url")
+                    ]
+                    if links:
+                        self.logger.info("Tìm thấy %d links từ JSON-LD mainEntity", len(links))
+                        return links
 
-        if not links:
-            # Thử selector dạng khác nếu LinkedIn thay đổi DOM
-            links = response.css("a[data-tracking-control-name='public_jobs_jserp-result_search-card']::attr(href)").getall()
+        # ── CSS selectors LinkedIn đã biết ───────────────────────────────────
+        selectors = [
+            "a.base-card__full-link::attr(href)",
+            "a[data-tracking-control-name*='search-card']::attr(href)",
+            "a[href*='/jobs/view/']::attr(href)",
+        ]
+        for sel in selectors:
+            links = response.css(sel).getall()
+            if links:
+                self.logger.info("Tìm thấy %d links từ CSS selector: %s", len(links), sel)
+                return links
 
-        if not links:
-            self.logger.warning("Không tìm thấy job links — LinkedIn có thể đã chặn hoặc thay đổi DOM")
-
-        return links
+        # ── DEBUG ─────────────────────────────────────────────────────────────
+        self.logger.warning("Không tìm thấy job links — lưu debug_linkedin.html")
+        with open("debug_linkedin.html", "w", encoding="utf-8") as f:
+            f.write(response.text)
+        return []

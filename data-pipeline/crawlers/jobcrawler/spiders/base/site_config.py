@@ -26,12 +26,12 @@ SITE_CONFIGS: dict[str, SiteConfig] = {
         requires_playwright=True,
         wait_for_selector=None,         # __NEXT_DATA__ không cần wait selector
         download_delay=2.0,
-        job_id_pattern=r"--([A-Za-z0-9]+)$",
+        job_id_pattern=r"-([A-Za-z0-9]+)$",   # Lấy segment cuối: "...-1643" → "1643"
     ),
 
     "topcv": SiteConfig(
         name="topcv",
-        start_url="https://topcv.vn/viec-lam-it",
+        start_url="https://www.topcv.vn/tim-viec-lam-cong-nghe-thong-tin-cr257",
         page_param="page",
         max_pages=100,
         requires_playwright=True,       # Bật Playwright — plain HTTP dễ bị 403 hơn
@@ -42,13 +42,13 @@ SITE_CONFIGS: dict[str, SiteConfig] = {
 
     "vietnamworks": SiteConfig(
         name="vietnamworks",
-        start_url="https://www.vietnamworks.com/viec-lam?industries=35",  # IT category
+        start_url="https://www.vietnamworks.com/viec-lam?q=it",  # IT category
         page_param="page",
         max_pages=100,
         requires_playwright=True,
         wait_for_selector=None,
         download_delay=2.0,
-        job_id_pattern=r"-(\d+)-jv$",
+        job_id_pattern=r"-(\d+)-jv",    # không dùng $ vì URL có thể còn query params
     ),
 
     # LinkedIn yêu cầu đăng nhập — cần xử lý auth cookie riêng

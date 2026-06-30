@@ -79,28 +79,32 @@ class DedupPipeline:
 class MinIOPipeline:
 
     def open_spider(self, spider):
-        self.client = Minio(
-            endpoint=os.getenv("MINIO_ENDPOINT", "localhost:9000"),
-            access_key=os.getenv("MINIO_ACCESS_KEY", "minioadmin"),
-            secret_key=os.getenv("MINIO_SECRET_KEY", "minioadmin123"),
-            secure=os.getenv("MINIO_SECURE", "false").lower() == "true",
-        )
+        self.client = None
         self.bucket = os.getenv("MINIO_BUCKET", "raw-jobs")
-
-        # Tạo bucket nếu chưa tồn tại
-        if not self.client.bucket_exists(self.bucket):
-            self.client.make_bucket(self.bucket)
-            logger.info("Created MinIO bucket: %s", self.bucket)
-
         self.upload_count = 0
         self.error_count = 0
+        try:
+            self.client = Minio(
+                endpoint=os.getenv("MINIO_ENDPOINT", "localhost:9000"),
+                access_key=os.getenv("MINIO_ACCESS_KEY", "minioadmin"),
+                secret_key=os.getenv("MINIO_SECRET_KEY", "minioadmin123"),
+                secure=os.getenv("MINIO_SECURE", "false").lower() == "true",
+            )
+            # Tạo bucket nếu chưa tồn tại (lần đầu chạy)
+            if not self.client.bucket_exists(self.bucket):
+                self.client.make_bucket(self.bucket)
+                logger.info("Created MinIO bucket: %s", self.bucket)
+        except Exception as e:
+            # Không crash crawler khi MinIO chưa sẵn sàng — chỉ log warning
+            logger.warning("MinIOPipeline: không kết nối được MinIO: %s", e)
+            self.client = None
 
     def close_spider(self, spider):
         logger.info("MinIOPipeline: uploaded=%d, errors=%d", self.upload_count, self.error_count)
 
     def process_item(self, item: RawJob, spider) -> RawJob:
-        if not item.raw_html:
-            return item  # Không có HTML → bỏ qua, không raise error
+        if self.client is None or not item.raw_html:
+            return item  # MinIO chưa kết nối hoặc không có HTML → bỏ qua
 
         ts = item.crawled_at
         object_name = (
@@ -157,7 +161,7 @@ class PostgresPipeline:
         self.conn = psycopg2.connect(
             dsn=os.getenv(
                 "DATABASE_URL",
-                "postgresql://postgres:postgres@localhost:5437/jobmatching"
+                "postgresql://postgres:postgres@localhost:5432/jobmatching"
             )
         )
         self.conn.autocommit = False
@@ -166,10 +170,15 @@ class PostgresPipeline:
         self.error_count = 0
 
     def close_spider(self, spider):
+        # Guard: open_spider có thể đã fail → conn/cursor chưa được set
+        if self.conn is None:
+            logger.info("PostgresPipeline: không có kết nối DB để đóng")
+            return
         try:
             self.conn.commit()
         finally:
-            self.cursor.close()
+            if self.cursor:
+                self.cursor.close()
             self.conn.close()
         logger.info("PostgresPipeline: inserted/updated=%d, errors=%d", self.insert_count, self.error_count)
 
