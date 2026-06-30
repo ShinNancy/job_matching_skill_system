@@ -161,7 +161,7 @@ class PostgresPipeline:
         self.conn = psycopg2.connect(
             dsn=os.getenv(
                 "DATABASE_URL",
-                "postgresql://postgres:postgres@localhost:5432/jobmatching"
+                "postgresql://postgres:postgres@localhost:5437/jobmatching"
             )
         )
         self.conn.autocommit = False
